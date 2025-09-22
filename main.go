@@ -75,6 +75,50 @@ type ServiceState struct {
 	currentMappings  map[int]PortMapping // port -> mapping info
 }
 
+// decodeCommandOutput converts Windows command output from UTF-16LE to UTF-8 if needed
+func decodeCommandOutput(output []byte) (string, error) {
+	if len(output) == 0 {
+		return "", nil
+	}
+
+	// Handle UTF-16 encoded output from Windows commands
+	var outputStr string
+	if len(output) > 0 && len(output)%2 == 0 {
+		// Check if this looks like UTF-16 (every other byte is null or BOM present)
+		isUTF16 := false
+		
+		// Check for UTF-16LE BOM
+		if len(output) >= 2 && output[0] == 0xFF && output[1] == 0xFE {
+			isUTF16 = true
+			output = output[2:] // Skip BOM
+		} else {
+			// Check for interleaved null bytes (UTF-16LE pattern)
+			for i := 1; i < len(output) && i < 20; i += 2 {
+				if output[i] == 0 {
+					isUTF16 = true
+					break
+				}
+			}
+		}
+
+		if isUTF16 {
+			// Convert UTF-16LE to UTF-8
+			u16s := make([]uint16, len(output)/2)
+			for i := 0; i < len(u16s); i++ {
+				u16s[i] = uint16(output[i*2]) | uint16(output[i*2+1])<<8
+			}
+			runes := utf16.Decode(u16s)
+			outputStr = string(runes)
+		} else {
+			outputStr = string(output)
+		}
+	} else {
+		outputStr = string(output)
+	}
+
+	return outputStr, nil
+}
+
 func main() {
 	// Check command line arguments
 	if len(os.Args) < 2 || len(os.Args) > 3 {
@@ -336,9 +380,17 @@ func checkFirewallRules(config *Config) int {
 		return 2
 	}
 
+	// Decode UTF-16 output from netsh
+	outputStr, err := decodeCommandOutput(output)
+	if err != nil {
+		fmt.Printf("⚠️  Unable to decode firewall rules output: %v\n", err)
+		fmt.Println("    Please verify firewall rules manually")
+		return 2
+	}
+
 	// Parse firewall rules to find which TCP ports are allowed
 	allowedPorts := make(map[int]bool)
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(outputStr, "\n")
 	var currentRule string
 	var isEnabled bool
 
@@ -628,31 +680,10 @@ func (s *ServiceState) getRunningWSLInstances() (map[string]bool, error) {
 
 	instances := make(map[string]bool)
 
-	// Handle UTF-16 encoded output from WSL on Windows
-	var outputStr string
-	if len(output) > 0 && len(output)%2 == 0 {
-		// Check if this looks like UTF-16 (every other byte is null)
-		isUTF16 := false
-		for i := 1; i < len(output) && i < 20; i += 2 {
-			if output[i] == 0 {
-				isUTF16 = true
-				break
-			}
-		}
-
-		if isUTF16 {
-			// Convert UTF-16LE to UTF-8
-			u16s := make([]uint16, len(output)/2)
-			for i := 0; i < len(u16s); i++ {
-				u16s[i] = uint16(output[i*2]) | uint16(output[i*2+1])<<8
-			}
-			runes := utf16.Decode(u16s)
-			outputStr = string(runes)
-		} else {
-			outputStr = string(output)
-		}
-	} else {
-		outputStr = string(output)
+	// Decode UTF-16 output from WSL
+	outputStr, err := decodeCommandOutput(output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode WSL output: %v", err)
 	}
 
 	// Split by Windows line endings first, then Unix line endings as fallback
@@ -702,8 +733,14 @@ func (s *ServiceState) getCurrentPortMappings() (map[int]PortMapping, error) {
 		return nil, fmt.Errorf("failed to execute netsh command: %v", err)
 	}
 
+	// Decode UTF-16 output from netsh
+	outputStr, err := decodeCommandOutput(output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode netsh output: %v", err)
+	}
+
 	mappings := make(map[int]PortMapping)
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(outputStr, "\n")
 
 	// Parse netsh output - format varies by Windows version
 	for _, line := range lines {

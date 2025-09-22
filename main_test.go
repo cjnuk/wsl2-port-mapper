@@ -400,3 +400,95 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestDecodeCommandOutput(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []byte
+		expected string
+		descr    string
+	}{
+		{
+			name:     "Empty input",
+			input:    []byte{},
+			expected: "",
+			descr:    "Empty byte slice should return empty string",
+		},
+		{
+			name:     "UTF-8 input",
+			input:    []byte("Hello World"),
+			expected: "Hello World",
+			descr:    "Regular UTF-8 should pass through unchanged",
+		},
+		{
+			name: "UTF-16LE with BOM",
+			// UTF-16LE BOM (0xFF, 0xFE) + "Hi" in UTF-16LE
+			input:    []byte{0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00},
+			expected: "Hi",
+			descr:    "UTF-16LE with BOM should be decoded correctly",
+		},
+		{
+			name: "UTF-16LE without BOM",
+			// "Test" in UTF-16LE (T=0x54,0x00, e=0x65,0x00, s=0x73,0x00, t=0x74,0x00)
+			input:    []byte{0x54, 0x00, 0x65, 0x00, 0x73, 0x00, 0x74, 0x00},
+			expected: "Test",
+			descr:    "UTF-16LE without BOM should be detected and decoded",
+		},
+		{
+			name: "WSL instance name",
+			// "Ubuntu-Dev" in UTF-16LE
+			input: []byte{0x55, 0x00, 0x62, 0x00, 0x75, 0x00, 0x6E, 0x00, 0x74, 0x00, 0x75, 0x00, 0x2D, 0x00, 0x44, 0x00, 0x65, 0x00, 0x76, 0x00},
+			expected: "Ubuntu-Dev",
+			descr:    "WSL instance names should decode correctly",
+		},
+		{
+			name: "netsh portproxy header",
+			// Simulated netsh output header in UTF-16LE: "Listen on "
+			input: []byte{0x4C, 0x00, 0x69, 0x00, 0x73, 0x00, 0x74, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x20, 0x00, 0x6F, 0x00, 0x6E, 0x00, 0x20, 0x00},
+			expected: "Listen on ",
+			descr:    "netsh command output should decode correctly",
+		},
+		{
+			name: "Port numbers with formatting",
+			// "Port: 8080" in UTF-16LE
+			input:    []byte{0x50, 0x00, 0x6F, 0x00, 0x72, 0x00, 0x74, 0x00, 0x3A, 0x00, 0x20, 0x00, 0x38, 0x00, 0x30, 0x00, 0x38, 0x00, 0x30, 0x00},
+			expected: "Port: 8080",
+			descr:    "Port numbers and colons should decode correctly",
+		},
+		{
+			name: "Windows line endings in UTF-16LE",
+			// "Test\r\n" in UTF-16LE
+			input:    []byte{0x54, 0x00, 0x65, 0x00, 0x73, 0x00, 0x74, 0x00, 0x0D, 0x00, 0x0A, 0x00},
+			expected: "Test\r\n",
+			descr:    "Windows line endings should be preserved during decoding",
+		},
+		{
+			name:     "Odd length bytes fallback",
+			input:    []byte{0x48, 0x00, 0x69}, // "Hi" but missing last byte
+			expected: "H\x00i", // Should fall back to UTF-8 interpretation
+			descr:    "Odd length byte arrays should fall back to UTF-8",
+		},
+		{
+			name: "Non-UTF-16 even bytes",
+			// Even number of bytes but not UTF-16 pattern
+			input:    []byte{0x48, 0x65, 0x6C, 0x6F}, // "Helo" in regular UTF-8
+			expected: "Helo",
+			descr:    "Even length non-UTF-16 should be treated as UTF-8",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := decodeCommandOutput(tt.input)
+			if err != nil {
+				t.Fatalf("decodeCommandOutput failed: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("%s\nExpected: %q\nGot: %q\nInput bytes: %v", tt.descr, tt.expected, result, tt.input)
+				// Debug output for failed tests
+				t.Logf("Expected bytes: %v", []byte(tt.expected))
+				t.Logf("Got bytes: %v", []byte(result))
+			}
+		})
+	}
+}
