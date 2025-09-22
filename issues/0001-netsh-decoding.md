@@ -1,5 +1,7 @@
 # Issue: Decode UTF-16 netsh output before parsing
 
+## Status: ✅ RESOLVED
+
 ## Summary
 The service invokes `netsh` to reconcile Windows portproxy and firewall state. However, `netsh` emits UTF-16 text. The current code in `checkFirewallRules` and `getCurrentPortMappings` assumes UTF-8 and passes raw `cmd.Output()` bytes directly into string parsing helpers. On Windows, this fails to match existing rules and entries, causing warnings about missing permissions and repeated attempts to recreate state that already exists.
 
