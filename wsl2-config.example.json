@@ -1,0 +1,29 @@
+{
+  "check_interval_seconds": 5,
+  "instances": [
+    {
+      "name": "Ubuntu-Dev",
+      "comment": "Development environment",
+      "ports": [
+        {
+          "port": 2222,
+          "comment": "SSH"
+        },
+        {
+          "port": 8080,
+          "comment": "HTTP server"
+        }
+      ]
+    },
+    {
+      "name": "Ubuntu-ML",
+      "comment": "Machine Learning workspace",
+      "ports": [
+        {
+          "port": 6006,
+          "comment": "TensorBoard"
+        }
+      ]
+    }
+  ]
+}

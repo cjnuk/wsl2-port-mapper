@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+blocked=$(git diff --cached --name-only | grep -E '(^|/|\\)wsl2-config\.json$' || true)
+if [ -n "$blocked" ]; then
+  echo "ERROR: Attempting to commit sensitive file: wsl2-config.json"
+  echo "This file is intentionally ignored. Use wsl2-config.example.json instead."
+  exit 1
+fi
