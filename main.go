@@ -73,6 +73,7 @@ type ServiceState struct {
 	configFile       string
 	runningInstances map[string]string   // instance name -> IP address
 	currentMappings  map[int]PortMapping // port -> mapping info
+	registryManager  *RegistryManager    // Windows registry tracking
 }
 
 // decodeCommandOutput converts Windows command output from UTF-16LE to UTF-8 if needed
@@ -157,6 +158,15 @@ func main() {
 		runningInstances: make(map[string]string),
 		currentMappings:  make(map[int]PortMapping),
 	}
+	
+	// Initialize registry manager for resource tracking
+	if rm, err := NewRegistryManager(); err != nil {
+		log.Printf("Warning: Failed to initialize registry manager: %v", err)
+		fmt.Println("Registry tracking disabled - resources won't be tracked for cleanup")
+	} else {
+		service.registryManager = rm
+		defer rm.Close()
+	}
 
 	// Setup graceful shutdown
 	c := make(chan os.Signal, 1)
@@ -225,7 +235,7 @@ func (s *ServiceState) handleFirewallRule(mapping PortMapping) {
 
 	log.Printf("Creating firewall rule for port %d (mode: %s, instance: %s)", mapping.ExternalPort, mapping.FirewallMode, mapping.Instance)
 
-	if err := addFirewallRule(mapping.ExternalPort, mapping.Instance, mapping.FirewallMode); err != nil {
+	if err := s.addFirewallRule(mapping.ExternalPort, mapping.Instance, mapping.FirewallMode); err != nil {
 		log.Printf("Warning: Failed to create firewall rule for port %d: %v", mapping.ExternalPort, err)
 		fmt.Printf("    ⚠️  Firewall rule creation failed: %v\n", err)
 		fmt.Printf("    💡 Manual command: netsh advfirewall firewall add rule name=\"WSL2 Port %d\" dir=in action=allow protocol=TCP localport=%d remoteip=%s\n",
@@ -333,6 +343,27 @@ func validateConfiguration(configFile string) int {
 	firewallExitCode := checkFirewallRules(&config)
 	if firewallExitCode > exitCode {
 		exitCode = firewallExitCode
+	}
+
+	// Audit registry state (if registry manager is available)
+	fmt.Println("\nℹ️  Checking Registry tracking state...")
+	if registryManager, err := NewRegistryManager(); err != nil {
+		fmt.Printf("⚠️  Registry manager unavailable: %v\n", err)
+		fmt.Println("    Resource tracking disabled - manual cleanup may be required")
+		if exitCode == 0 {
+			exitCode = 2 // warning
+		}
+	} else {
+		defer registryManager.Close()
+		if allGood, err := registryManager.AuditRegistryState(); err != nil {
+			fmt.Printf("❌ Registry audit failed: %v\n", err)
+			exitCode = 1
+		} else if !allGood {
+			fmt.Println("\n💡 Tip: Run service normally to auto-cleanup, or use registry cleanup tools")
+			if exitCode == 0 {
+				exitCode = 2 // warning
+			}
+		}
 	}
 
 	// Summary
@@ -535,7 +566,7 @@ func generateFirewallRuleName(port int, instance string) string {
 }
 
 // addFirewallRule creates a Windows Firewall rule for the specified port
-func addFirewallRule(port int, instance string, mode string) error {
+func (s *ServiceState) addFirewallRule(port int, instance string, mode string) error {
 	if !isRunningAsAdmin() {
 		return fmt.Errorf("admin privileges required for firewall rule creation")
 	}
@@ -574,11 +605,18 @@ func addFirewallRule(port int, instance string, mode string) error {
 		return fmt.Errorf("failed to create firewall rule: %v", err)
 	}
 
+	// Register in registry for tracking
+	if s.registryManager != nil {
+		if err := s.registryManager.RegisterFirewallRule(ruleName, port, instance); err != nil {
+			log.Printf("Warning: Failed to register firewall rule in registry: %v", err)
+		}
+	}
+
 	return nil
 }
 
 // removeFirewallRule removes a Windows Firewall rule
-func removeFirewallRule(port int, instance string) error {
+func (s *ServiceState) removeFirewallRule(port int, instance string) error {
 	if !isRunningAsAdmin() {
 		return fmt.Errorf("admin privileges required for firewall rule removal")
 	}
@@ -588,6 +626,13 @@ func removeFirewallRule(port int, instance string) error {
 	cmd := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", fmt.Sprintf("name=%s", ruleName))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to remove firewall rule: %v", err)
+	}
+
+	// Unregister from registry
+	if s.registryManager != nil {
+		if err := s.registryManager.UnregisterFirewallRule(ruleName); err != nil {
+			log.Printf("Warning: Failed to unregister firewall rule from registry: %v", err)
+		}
 	}
 
 	return nil
@@ -669,6 +714,13 @@ func (s *ServiceState) serviceLoop() {
 
 	// Calculate and apply required changes
 	s.reconcilePortForwarding(currentMappings)
+
+	// Perform automatic registry cleanup (remove orphaned entries)
+	if s.registryManager != nil {
+		if err := s.registryManager.CleanupOrphanedEntries(); err != nil {
+			log.Printf("Warning: Registry cleanup failed: %v", err)
+		}
+	}
 }
 
 func (s *ServiceState) getRunningWSLInstances() (map[string]bool, error) {
@@ -969,6 +1021,21 @@ func (s *ServiceState) addPortMapping(externalPort int, internalPort int, target
 		return fmt.Errorf("netsh add command failed: %v", err)
 	}
 
+	// Register in registry for tracking
+	if s.registryManager != nil {
+		// Find the instance name for this mapping
+		instance := "unknown"
+		for instanceName, ip := range s.runningInstances {
+			if ip == targetIP {
+				instance = instanceName
+				break
+			}
+		}
+		if err := s.registryManager.RegisterPortProxy(externalPort, targetIP, internalPort, instance); err != nil {
+			log.Printf("Warning: Failed to register port proxy in registry: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -988,6 +1055,13 @@ func (s *ServiceState) removePortMapping(port int) error {
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("netsh delete command failed: %v", err)
+	}
+
+	// Unregister from registry
+	if s.registryManager != nil {
+		if err := s.registryManager.UnregisterPortProxy(port); err != nil {
+			log.Printf("Warning: Failed to unregister port proxy from registry: %v", err)
+		}
 	}
 
 	return nil

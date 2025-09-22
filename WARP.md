@@ -113,12 +113,18 @@ ai-runner analyze-pr --cache --agents claude,gemini
    - Automatic Windows Firewall rule creation (local/full modes)
    - Service state reconciliation loop
 
-4. **Service Framework**
+4. **Registry-Based Resource Tracking** (`RegistryManager`)
+   - Windows Registry integration for persistent resource tracking
+   - Automatic registration/deregistration of port proxies and firewall rules
+   - Built-in audit and cleanup capabilities to prevent orphaned resources
+   - Registry structure: `HKLM\SOFTWARE\WSL2PortMapper\{PortProxies|FirewallRules}`
+
+5. **Service Framework**
    - NSSM-based Windows service installation
    - Graceful shutdown handling (SIGINT/SIGTERM)
    - Configurable check intervals with live configuration reload
 
-5. **Conflict Resolution Engine**
+6. **Conflict Resolution Engine**
    - Runtime handling of duplicate external ports across instances
    - First-configured-wins policy for simultaneous conflicts
    - Warning logging and status display for conflicts
@@ -126,10 +132,13 @@ ai-runner analyze-pr --cache --agents claude,gemini
 ### Data Flow
 
 1. **Configuration Load**: Parse and validate `wsl2-config.json`
-2. **WSL Discovery**: Query running WSL2 instances and their current IP addresses  
-3. **State Reconciliation**: Compare desired port mappings vs current `netsh` state
-4. **Windows Integration**: Apply changes via `netsh portproxy` and firewall commands
-5. **Monitoring Loop**: Wait for configured interval and repeat
+2. **Registry Initialization**: Initialize Windows Registry tracking for resources
+3. **WSL Discovery**: Query running WSL2 instances and their current IP addresses  
+4. **State Reconciliation**: Compare desired port mappings vs current `netsh` state
+5. **Windows Integration**: Apply changes via `netsh portproxy` and firewall commands
+6. **Registry Tracking**: Register/unregister resources in Windows Registry for cleanup
+7. **Automatic Cleanup**: Remove orphaned registry entries and stale resources
+8. **Monitoring Loop**: Wait for configured interval and repeat
 
 ### Key Entry Points
 
@@ -169,7 +178,30 @@ netsh interface portproxy delete v4tov4 listenport=8080
 netsh interface portproxy reset
 ```
 
-### Firewall Rule Audit Commands
+### Registry-Based Resource Tracking
+
+The WSL2 Port Mapper now uses Windows Registry for robust resource tracking and automatic cleanup:
+
+**Registry Structure:**
+- `HKLM\SOFTWARE\WSL2PortMapper\PortProxies` - Tracks netsh port proxy entries
+- `HKLM\SOFTWARE\WSL2PortMapper\FirewallRules` - Tracks Windows Firewall rules
+
+**Automatic Operations:**
+- All port proxies and firewall rules are registered in the registry when created
+- Automatic cleanup removes orphaned registry entries during service operation
+- Registry audit integrated into `--validate` command
+
+```bash
+# Audit registry vs actual system state
+.\wsl2-port-mapper.exe --validate wsl2-config.json
+
+# Registry audit is included automatically and shows:
+# - Orphaned registry entries (registry has it, system doesn't)
+# - Unregistered resources (system has it, registry doesn't)
+# - Overall registry health status
+```
+
+### Manual Resource Audit Commands
 
 ```powershell
 # Show all WSL2 Port Mapper firewall rules
@@ -178,23 +210,9 @@ Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*" | Select-Obje
 # Show detailed firewall rule information
 Get-NetFirewallRule -DisplayName "WSL2-Port-8080-*" | Get-NetFirewallAddressFilter
 
-# Find orphaned firewall rules (rules without corresponding port proxies)
-$portRules = Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*"
-$activeProxies = (netsh interface portproxy show v4tov4 | Select-String "\d+").Matches.Value
-foreach ($rule in $portRules) {
-    $port = ($rule.DisplayName -split '-')[2]
-    if ($port -notin $activeProxies) {
-        Write-Host "Orphaned firewall rule: $($rule.DisplayName)" -ForegroundColor Yellow
-    }
-}
-
-# Find orphaned port proxies (proxies without running WSL2 instances)
-$runningInstances = (wsl --list --running --quiet) -split "`n" | Where-Object { $_ -ne "" }
-netsh interface portproxy show v4tov4 | Select-String "\d+" | ForEach-Object {
-    $port = $_.Line.Split()[1]
-    $targetIP = $_.Line.Split()[2]
-    # Check if any running instance has this IP
-    $hasRunningInstance = $false
+# Check registry entries (requires Administrator)
+Get-ChildItem "HKLM:\SOFTWARE\WSL2PortMapper\PortProxies"
+Get-ChildItem "HKLM:\SOFTWARE\WSL2PortMapper\FirewallRules"
     foreach ($instance in $runningInstances) {
         try {
             $instanceIP = (wsl -d $instance -- hostname -I).Trim().Split()[0]
@@ -203,6 +221,21 @@ netsh interface portproxy show v4tov4 | Select-String "\d+" | ForEach-Object {
     }
     if (-not $hasRunningInstance) {
         Write-Host "Orphaned port proxy: Port $port -> $targetIP (no running WSL2 instance)" -ForegroundColor Red
+    }
+}
+
+# Enhanced audit: Show WSL2 Port Mapper managed resources
+$wsl2Rules = Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*WSL2PM"
+$allProxies = netsh interface portproxy show v4tov4
+
+Write-Host "WSL2 Port Mapper Managed Resources:" -ForegroundColor Green
+foreach ($rule in $wsl2Rules) {
+    # Extract port from rule name: WSL2-Port-8080-1234-WSL2PM
+    if ($rule.DisplayName -match 'WSL2-Port-(\d+)-\d+-WSL2PM') {
+        $port = $matches[1]
+        $hasProxy = $allProxies -match "\s+$port\s+"
+        $status = if ($hasProxy) { "✅ Active" } else { "❌ Orphaned Firewall Rule" }
+        Write-Host "  Port $port : $status" -ForegroundColor $(if ($hasProxy) { 'Green' } else { 'Yellow' })
     }
 }
 
@@ -469,6 +502,97 @@ cmd := exec.Command("netsh", "interface", "portproxy", "delete", "v4tov4",
 - ❌ Firewall rules remain active (Bug 2)
 
 **Combined Impact**: **Complete failure of security cleanup** - both networking and firewall holes remain open indefinitely.
+
+## Registry-Based Tracking System (Windows-Centric Solution)
+
+### Problem: Reliable Resource Identification and Cleanup
+
+**Current Issues:**
+- Port proxy cleanup fails silently (Bug 1)
+- Firewall cleanup never happens (Bug 2)  
+- No reliable way to identify which resources belong to WSL2 Port Mapper
+- `netsh portproxy` has no custom naming/description support
+
+### Proposed Solution: Windows Registry Tracking
+
+**Registry Structure:**
+```
+HKLM\SOFTWARE\WSL2PortMapper\
+├── PortProxies\
+│   ├── Port_8080 = '{"external_port":8080,"internal_port":80,"target_ip":"10.10.185.157","instance":"n8n","created":"2025-09-22T13:15:00Z"}'
+│   └── Port_3501 = '{"external_port":3501,"internal_port":3501,"target_ip":"10.10.185.157","instance":"n8n","created":"2025-09-22T13:15:00Z"}'
+└── FirewallRules\
+    ├── Rule_8080_n8n = '{"port":8080,"rule_name":"WSL2-Port-8080-7556","instance":"n8n","created":"2025-09-22T13:15:00Z"}'
+    └── Rule_3501_n8n = '{"port":3501,"rule_name":"WSL2-Port-3501-7556","instance":"n8n","created":"2025-09-22T13:15:00Z"}'
+```
+
+**Implementation Approach:**
+```go
+// Register port proxy creation
+func (s *ServiceState) addPortMapping(externalPort, internalPort int, targetIP string) error {
+    // Create netsh port proxy
+    if err := createNetshPortProxy(externalPort, internalPort, targetIP); err != nil {
+        return err
+    }
+    // Register in registry
+    return registerPortProxy(externalPort, internalPort, targetIP, instanceName)
+}
+
+// Register firewall rule creation  
+func addFirewallRule(port int, instance, mode string) error {
+    ruleName := generateFirewallRuleName(port, instance)
+    // Create Windows firewall rule
+    if err := createWindowsFirewallRule(port, ruleName, mode); err != nil {
+        return err
+    }
+    // Register in registry
+    return registerFirewallRule(port, ruleName, instance)
+}
+```
+
+**Benefits:**
+- **Perfect identification**: Registry provides definitive source of truth
+- **Rich metadata**: Store instance names, timestamps, port mappings
+- **Windows-native**: Uses built-in Windows infrastructure
+- **Atomic operations**: Can ensure registry and actual state stay synchronized
+- **Audit capabilities**: Easy to detect inconsistencies between registry and reality
+
+### Registry Management Commands
+
+**PowerShell Registry Manager Script:**
+```powershell
+# Show current registry tracking status
+.\registry-manager.ps1 Status
+
+# Audit consistency between registry and actual state
+.\registry-manager.ps1 Audit
+
+# Clean up all registry tracking (does NOT remove actual resources)
+.\registry-manager.ps1 Cleanup
+
+# Repair registry by detecting orphaned WSL2 resources
+.\registry-manager.ps1 Repair
+```
+
+**Manual Registry Inspection:**
+```powershell
+# View all tracked port proxies
+Get-ChildItem "HKLM:\SOFTWARE\WSL2PortMapper\PortProxies" | ForEach-Object {
+    $data = Get-ItemProperty -Path $_.PSPath -Name $_.Name
+    $entry = $data.$($_.Name) | ConvertFrom-Json
+    Write-Host "Port $($entry.external_port) → $($entry.target_ip):$($entry.internal_port) [$($entry.instance)]"
+}
+
+# View all tracked firewall rules
+Get-ChildItem "HKLM:\SOFTWARE\WSL2PortMapper\FirewallRules" | ForEach-Object {
+    $data = Get-ItemProperty -Path $_.PSPath -Name $_.Name  
+    $entry = $data.$($_.Name) | ConvertFrom-Json
+    Write-Host "Rule '$($entry.rule_name)' for Port $($entry.port) [$($entry.instance)]"
+}
+
+# Emergency cleanup (removes all WSL2PM registry entries)
+Remove-Item -Path "HKLM:\SOFTWARE\WSL2PortMapper" -Recurse -Force
+```
 
 **Proposed Fix**: Modify `reconcilePortForwarding()` in `main.go` line ~944-952:
 ```go
