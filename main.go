@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 )
 
 // Configuration structures
@@ -218,7 +219,41 @@ func (s *ServiceState) getRunningWSLInstances() (map[string]bool, error) {
 	}
 
 	instances := make(map[string]bool)
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	// Handle UTF-16 encoded output from WSL on Windows
+	var outputStr string
+	if len(output) > 0 && len(output)%2 == 0 {
+		// Check if this looks like UTF-16 (every other byte is null)
+		isUTF16 := false
+		for i := 1; i < len(output) && i < 20; i += 2 {
+			if output[i] == 0 {
+				isUTF16 = true
+				break
+			}
+		}
+
+		if isUTF16 {
+			// Convert UTF-16LE to UTF-8
+			u16s := make([]uint16, len(output)/2)
+			for i := 0; i < len(u16s); i++ {
+				u16s[i] = uint16(output[i*2]) | uint16(output[i*2+1])<<8
+			}
+			runes := utf16.Decode(u16s)
+			outputStr = string(runes)
+		} else {
+			outputStr = string(output)
+		}
+	} else {
+		outputStr = string(output)
+	}
+
+	// Split by Windows line endings first, then Unix line endings as fallback
+	var lines []string
+	if strings.Contains(outputStr, "\r\n") {
+		lines = strings.Split(strings.TrimSpace(outputStr), "\r\n")
+	} else {
+		lines = strings.Split(strings.TrimSpace(outputStr), "\n")
+	}
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -270,15 +305,16 @@ func (s *ServiceState) getCurrentPortMappings() (map[int]PortMapping, error) {
 		}
 
 		// Look for lines containing port mappings
-		// Format: "listenport   listenaddress   connectport   connectaddress"
+		// Format: "0.0.0.0         22          10.10.185.157   22"
+		// Fields: [listenaddress, listenport, connectaddress, connectport]
 		fields := strings.Fields(line)
 		if len(fields) >= 4 {
-			listenPort, err := strconv.Atoi(fields[0])
+			listenPort, err := strconv.Atoi(fields[1])
 			if err != nil {
 				continue
 			}
 
-			connectIP := fields[3]
+			connectIP := fields[2]
 
 			mappings[listenPort] = PortMapping{
 				Port:     listenPort,

@@ -23,6 +23,14 @@ dist/*
 go.work
 go.work.sum
 
+# Personal/System specific files (SECURITY: Never commit personal configs)
+*-discovered.json
+*-complete.json
+*-previous.json
+test-config.json
+DISCOVERY-*.md
+PORT-*.md
+
 # OS / editor files
 .vscode/
 .idea/
@@ -34,3 +42,19 @@ Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
 *.lnk
+
+# System/environment specific
+.env
+.env.local
+.env.production
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Backup files
+*.bak
+*.backup
+*.orig
+*~
