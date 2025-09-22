@@ -220,9 +220,9 @@ ssh psdt05 "wsl --list --running"  # Good
 - Confirm WSL2 uses NAT mode in `~/.wslconfig`: `networkingMode=nat`
 - **Hyper-V firewall conflict**: If you see "Hyper-V firewall is not supported" and fallback to VirtioProxy:
   - **VirtioProxy mode works perfectly** with WSL2 Port Mapper (uses 10.x.x.x IP range)
-  - Either enable Hyper-V: `Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All` (requires reboot)
-  - Or disable WSL firewall in `.wslconfig`: remove or comment `firewall=true` from `[experimental]`
-  - Or remove `networkingMode=nat` to let WSL2 choose the best mode for your system
+  - **Recommended**: Explicitly set `networkingMode=virtioProxy` in `[wsl2]` section (no experimental features needed)
+  - Alternative: Enable Hyper-V: `Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All` (requires reboot)
+  - Alternative: Remove experimental features that require Hyper-V (`firewall=true`, `dnsTunneling=true`)
 - Restart WSL2 after config changes: `wsl --shutdown`
 - Verify instance IP with: `wsl -d <name> -- hostname -I`
 - Check current networking mode: `wsl --status` or observe startup messages
@@ -266,6 +266,12 @@ If your WSL2 falls back to VirtioProxy mode instead of NAT:
 - Potentially better performance (no NAT translation overhead)
 - Simpler firewall management (same IP space as host)
 
+**Important**: Even with shared IP addresses, **port mapping is still required** because:
+- WSL2 runs in isolated network namespace (separate network stack)
+- Windows host cannot directly access WSL2 services despite shared IP
+- `netsh portproxy` bridges the network namespace isolation
+- This is different from VMs - WSL2 uses "shared IP, isolated network stack" architecture
+
 ```bash
 # Test if port mapping still works
 .\wsl2-port-forwarder.exe wsl2-config.json
@@ -281,6 +287,31 @@ netsh interface portproxy show v4tov4
 
 # Remove test mapping
 netsh interface portproxy delete v4tov4 listenport=8080
+```
+
+### Optimal .wslconfig for VirtioProxy Mode
+
+If your system doesn't support NAT mode or you prefer VirtioProxy:
+
+```ini
+# Optimized WSL2 Configuration for VirtioProxy Mode
+# No experimental features, explicit networking mode
+[wsl2]
+memory=90GB 
+processors=30
+guiApplications=false
+gpuSupport=true
+swap=64GB
+localhostforwarding=true
+nestedVirtualization=false
+debugConsole=false
+vmIdleTimeout=-1
+
+# Explicit VirtioProxy networking mode
+networkingMode=virtioProxy
+
+[general]
+instanceIdleTimeout=-1
 ```
 
 ### Python Automation Scripts
