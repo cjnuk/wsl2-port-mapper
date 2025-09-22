@@ -1,0 +1,37 @@
+--- main.go.original	2025-09-22 13:00:00.000000000 +0000
++++ main.go.fixed		2025-09-22 13:01:00.000000000 +0000
+@@ -944,10 +944,30 @@
+ 		if belongsToUs {
+ 			fmt.Printf("  Removing port %d (instance no longer running)\n", port)
+ 			if err := s.removePortMapping(port); err != nil {
+ 				log.Printf("Error removing port mapping %d: %v", port, err)
+ 			} else {
+ 				fmt.Printf("    ✓ Port %d mapping removed\n", port)
+ 				changesMade = true
++				
++				// SECURITY FIX: Remove corresponding firewall rule
++				for _, instance := range s.config.Instances {
++					for _, configPort := range instance.Ports {
++						if configPort.ExternalPortEffective() == port && configPort.ShouldManageFirewall() {
++							if err := removeFirewallRule(port, instance.Name); err != nil {
++								log.Printf("Warning: Failed to remove firewall rule for port %d: %v", port, err)
++								fmt.Printf("    ⚠️  Manual firewall cleanup needed: Remove-NetFirewallRule -DisplayName \"WSL2-Port-%d-*\"\n", port)
++							} else {
++								fmt.Printf("    🔥 Firewall rule removed for port %d\n", port)
++							}
++							break // Only need to remove once per port
++						}
++					}
++				}
+ 			}
+ 		}
+ 	}
++@@ -985,7 +1005,8 @@
++ func (s *ServiceState) removePortMapping(port int) error {
++ 	cmd := exec.Command("netsh", "interface", "portproxy", "delete", "v4tov4",
++-		fmt.Sprintf("listenport=%d", port))
+++		"listenaddress=0.0.0.0",  // BUG FIX: Must include listenaddress for delete
+++		fmt.Sprintf("listenport=%d", port))
++ 
++ 	if err := cmd.Run(); err != nil {
++ 		return fmt.Errorf("netsh delete command failed: %v", err)

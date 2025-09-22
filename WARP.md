@@ -184,7 +184,25 @@ $activeProxies = (netsh interface portproxy show v4tov4 | Select-String "\d+").M
 foreach ($rule in $portRules) {
     $port = ($rule.DisplayName -split '-')[2]
     if ($port -notin $activeProxies) {
-        Write-Host "Orphaned rule: $($rule.DisplayName)" -ForegroundColor Yellow
+        Write-Host "Orphaned firewall rule: $($rule.DisplayName)" -ForegroundColor Yellow
+    }
+}
+
+# Find orphaned port proxies (proxies without running WSL2 instances)
+$runningInstances = (wsl --list --running --quiet) -split "`n" | Where-Object { $_ -ne "" }
+netsh interface portproxy show v4tov4 | Select-String "\d+" | ForEach-Object {
+    $port = $_.Line.Split()[1]
+    $targetIP = $_.Line.Split()[2]
+    # Check if any running instance has this IP
+    $hasRunningInstance = $false
+    foreach ($instance in $runningInstances) {
+        try {
+            $instanceIP = (wsl -d $instance -- hostname -I).Trim().Split()[0]
+            if ($instanceIP -eq $targetIP) { $hasRunningInstance = $true; break }
+        } catch { }
+    }
+    if (-not $hasRunningInstance) {
+        Write-Host "Orphaned port proxy: Port $port -> $targetIP (no running WSL2 instance)" -ForegroundColor Red
     }
 }
 
@@ -321,10 +339,14 @@ echo '{"check_interval_seconds": 5, "instances": [{"name": "<instance>", "ports"
 .\wsl2-port-forwarder.exe test-config.json
 # Watch for firewall rule creation messages
 
-# Test firewall cleanup (current security gap)
+# Test CRITICAL BUGS: Port proxy and firewall cleanup
 wsl --terminate <instance>  # Stop the WSL2 instance
-# Port proxy should be removed, but firewall rule may remain
-Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port-8080*"  # Should be empty after fix
+
+# BUG 1 TEST: Port proxy cleanup fails
+netsh interface portproxy show v4tov4  # Will show proxy still active (BUG!)
+
+# BUG 2 TEST: Firewall cleanup never happens  
+Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port-8080*"  # Will show rule still active (BUG!)
 
 # Manual cleanup until fix is implemented:
 Remove-NetFirewallRule -DisplayName "WSL2-Port-8080-*"
@@ -417,15 +439,36 @@ wsl --list --running --quiet
 - Configuration files are environment-specific (never commit personal configs)
 - Use `--validate` flag in CI pipelines to catch configuration errors early
 
-## Security Improvement Opportunity
+## Critical Security Bugs Discovered
 
-**Current Gap**: The service has `removeFirewallRule()` function but doesn't call it during reconciliation.
+### Bug 1: Port Proxy Cleanup Fails Silently
 
-**Issue**: When WSL2 instances stop or are removed from configuration:
-- ✅ Port proxy mappings are removed (good security)
-- ❌ Firewall rules remain active (security exposure)
+**Issue**: `removePortMapping()` in `main.go` line 985-994 is missing `listenaddress=0.0.0.0` parameter.
 
-**Impact**: Unnecessary firewall holes remain open after services shut down.
+**Impact**: Port proxy mappings are **NOT actually removed** when instances shut down!
+
+**Current Buggy Code:**
+```go
+cmd := exec.Command("netsh", "interface", "portproxy", "delete", "v4tov4",
+    fmt.Sprintf("listenport=%d", port))  // ❌ Missing listenaddress
+```
+
+**Fixed Code:**
+```go
+cmd := exec.Command("netsh", "interface", "portproxy", "delete", "v4tov4",
+    "listenaddress=0.0.0.0",  // ✅ Must include listenaddress
+    fmt.Sprintf("listenport=%d", port))
+```
+
+### Bug 2: Firewall Rules Never Cleaned Up
+
+**Issue**: The service has `removeFirewallRule()` function but doesn't call it during reconciliation.
+
+**Impact**: When WSL2 instances stop or are removed from configuration:
+- ❌ Port proxy mappings remain active (Bug 1)
+- ❌ Firewall rules remain active (Bug 2)
+
+**Combined Impact**: **Complete failure of security cleanup** - both networking and firewall holes remain open indefinitely.
 
 **Proposed Fix**: Modify `reconcilePortForwarding()` in `main.go` line ~944-952:
 ```go
