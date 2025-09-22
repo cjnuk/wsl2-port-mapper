@@ -94,11 +94,12 @@ wsl --shutdown
       "ports": [
         {
           "port": 2201,
-          "comment": "SSH access"
+          "internal_port": 22,
+          "comment": "SSH access (external 2201 -> internal 22)"
         },
         {
           "port": 8001,
-          "comment": "FastAPI server"
+          "comment": "FastAPI server (same port internally)"
         },
         {
           "port": 8888,
@@ -112,11 +113,13 @@ wsl --shutdown
       "ports": [
         {
           "port": 2202,
-          "comment": "SSH access"
+          "internal_port": 22,
+          "comment": "SSH access (external 2202 -> internal 22)"
         },
         {
           "port": 8002,
-          "comment": "TensorBoard"
+          "internal_port": 6006,
+          "comment": "TensorBoard (external 8002 -> internal 6006)"
         }
       ]
     }
@@ -128,9 +131,37 @@ wsl --shutdown
 
 - ✅ **check_interval_seconds**: 1-3600 seconds (how often to check for changes)
 - ✅ **instance names**: Must match exact WSL2 distribution names (`wsl -l`)
-- ✅ **port numbers**: 1-65535, no duplicates across all instances
+- ✅ **port numbers**: 1-65535, no duplicate **external** ports across all instances
+- ✅ **internal_port** (optional): Target port inside WSL instance; defaults to same as `port`
 - ✅ **comments**: Optional for both instances and ports
 - ✅ **live reload**: Changes take effect on next check cycle (no restart needed)
+
+### External vs Internal Port Mapping
+
+**NEW FEATURE**: You can now map different external and internal ports!
+
+- **`port`**: External port on Windows host (required)
+- **`internal_port`**: Target port inside WSL instance (optional, defaults to `port`)
+
+**Key Benefits:**
+- Multiple WSL instances can use standard internal ports (like SSH port 22)
+- External ports remain unique for each instance
+- Backward compatible - existing configs work unchanged
+
+**Examples:**
+```json
+// SSH access to different instances, all using port 22 internally
+{ "port": 2201, "internal_port": 22, "comment": "SSH to Ubuntu-AI" }
+{ "port": 2202, "internal_port": 22, "comment": "SSH to Ubuntu-GPU" }
+{ "port": 2203, "internal_port": 22, "comment": "SSH to Ubuntu-Web" }
+
+// Web services using standard HTTP/HTTPS ports internally
+{ "port": 8080, "internal_port": 80,  "comment": "HTTP server" }
+{ "port": 8443, "internal_port": 443, "comment": "HTTPS server" }
+
+// Same external and internal port (legacy behavior)
+{ "port": 3000, "comment": "Node.js dev server" }
+```
 
 ## Service Management
 

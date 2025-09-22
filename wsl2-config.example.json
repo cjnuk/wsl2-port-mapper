@@ -6,12 +6,18 @@
       "comment": "Development environment",
       "ports": [
         {
-          "port": 2222,
-          "comment": "SSH"
+          "port": 2201,
+          "internal_port": 22,
+          "comment": "SSH (external 2201 -> internal 22)"
         },
         {
           "port": 8080,
-          "comment": "HTTP server"
+          "internal_port": 80,
+          "comment": "HTTP server (external 8080 -> internal 80)"
+        },
+        {
+          "port": 3000,
+          "comment": "Node.js dev server (same port internally)"
         }
       ]
     },
@@ -20,8 +26,17 @@
       "comment": "Machine Learning workspace",
       "ports": [
         {
+          "port": 2202,
+          "internal_port": 22,
+          "comment": "SSH (external 2202 -> internal 22)"
+        },
+        {
           "port": 6006,
-          "comment": "TensorBoard"
+          "comment": "TensorBoard (same port internally)"
+        },
+        {
+          "port": 8888,
+          "comment": "Jupyter Notebook"
         }
       ]
     }

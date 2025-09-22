@@ -18,8 +18,22 @@ import (
 
 // Configuration structures
 type Port struct {
-	Port    int    `json:"port"`
-	Comment string `json:"comment,omitempty"`
+	Port         int    `json:"port"`
+	InternalPort int    `json:"internal_port,omitempty"`
+	Comment      string `json:"comment,omitempty"`
+}
+
+// ExternalPortEffective returns the external (listen) port
+func (p Port) ExternalPortEffective() int {
+	return p.Port
+}
+
+// InternalPortEffective returns the internal (connect) port, defaulting to external port if not specified
+func (p Port) InternalPortEffective() int {
+	if p.InternalPort != 0 {
+		return p.InternalPort
+	}
+	return p.ExternalPortEffective()
 }
 
 type Instance struct {
@@ -35,10 +49,11 @@ type Config struct {
 
 // Runtime state structures
 type PortMapping struct {
-	Port     int
-	TargetIP string
-	Instance string
-	Comment  string
+	ExternalPort int // Listen port on Windows host
+	InternalPort int // Target port in WSL instance
+	TargetIP     string
+	Instance     string
+	Comment      string
 }
 
 type ServiceState struct {
@@ -145,8 +160,8 @@ func (s *ServiceState) validateConfiguration(config *Config) error {
 		return fmt.Errorf("check_interval_seconds must be between 1 and 3600")
 	}
 
-	// Track used ports to detect duplicates
-	usedPorts := make(map[int]string)
+	// Track used external ports to detect duplicates
+	usedExternalPorts := make(map[int]string)
 
 	// Validate instances and ports
 	for _, instance := range config.Instances {
@@ -155,15 +170,23 @@ func (s *ServiceState) validateConfiguration(config *Config) error {
 		}
 
 		for _, port := range instance.Ports {
+			// Validate external port (required)
 			if port.Port < 1 || port.Port > 65535 {
-				return fmt.Errorf("invalid port number %d in instance %s", port.Port, instance.Name)
+				return fmt.Errorf("invalid external port number %d in instance %s", port.Port, instance.Name)
 			}
 
-			if existingInstance, exists := usedPorts[port.Port]; exists {
-				return fmt.Errorf("duplicate port %d found in instances %s and %s", port.Port, existingInstance, instance.Name)
+			// Validate internal port (optional, defaults to external port)
+			if port.InternalPort != 0 && (port.InternalPort < 1 || port.InternalPort > 65535) {
+				return fmt.Errorf("invalid internal port number %d in instance %s", port.InternalPort, instance.Name)
 			}
 
-			usedPorts[port.Port] = instance.Name
+			// Check for duplicate external ports (this is not allowed)
+			externalPort := port.ExternalPortEffective()
+			if existingInstance, exists := usedExternalPorts[externalPort]; exists {
+				return fmt.Errorf("duplicate external port %d found in instances %s and %s", externalPort, existingInstance, instance.Name)
+			}
+
+			usedExternalPorts[externalPort] = instance.Name
 		}
 	}
 
@@ -315,10 +338,15 @@ func (s *ServiceState) getCurrentPortMappings() (map[int]PortMapping, error) {
 			}
 
 			connectIP := fields[2]
+			connectPort, err := strconv.Atoi(fields[3])
+			if err != nil {
+				continue
+			}
 
 			mappings[listenPort] = PortMapping{
-				Port:     listenPort,
-				TargetIP: connectIP,
+				ExternalPort: listenPort,
+				InternalPort: connectPort,
+				TargetIP:     connectIP,
 			}
 		}
 	}
@@ -363,7 +391,13 @@ func (s *ServiceState) displayCurrentState() {
 				portComment = fmt.Sprintf(" (%s)", port.Comment)
 			}
 
-			fmt.Printf("    %d -> %s:%d%s\n", port.Port, ip, port.Port, portComment)
+			externalPort := port.ExternalPortEffective()
+			internalPort := port.InternalPortEffective()
+			if externalPort == internalPort {
+				fmt.Printf("    %d -> %s:%d%s\n", externalPort, ip, internalPort, portComment)
+			} else {
+				fmt.Printf("    %d -> %s:%d%s (external:%d -> internal:%d)\n", externalPort, ip, internalPort, portComment, externalPort, internalPort)
+			}
 		}
 	}
 
@@ -384,11 +418,14 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 		}
 
 		for _, port := range instance.Ports {
-			desiredMappings[port.Port] = PortMapping{
-				Port:     port.Port,
-				TargetIP: ip,
-				Instance: instance.Name,
-				Comment:  port.Comment,
+			externalPort := port.ExternalPortEffective()
+			internalPort := port.InternalPortEffective()
+			desiredMappings[externalPort] = PortMapping{
+				ExternalPort: externalPort,
+				InternalPort: internalPort,
+				TargetIP:     ip,
+				Instance:     instance.Name,
+				Comment:      port.Comment,
 			}
 		}
 	}
@@ -399,20 +436,28 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 
 		if !exists {
 			// Add new mapping
-			fmt.Printf("  Adding port %d: None -> %s\n", port, desired.TargetIP)
-			if err := s.addPortMapping(port, desired.TargetIP); err != nil {
-				log.Printf("Error adding port mapping %d: %v", port, err)
+			if desired.ExternalPort == desired.InternalPort {
+				fmt.Printf("  Adding port %d: None -> %s:%d\n", desired.ExternalPort, desired.TargetIP, desired.InternalPort)
 			} else {
-				fmt.Printf("    ✓ Port %d now forwarded to %s\n", port, desired.TargetIP)
+				fmt.Printf("  Adding port %d -> %d: None -> %s:%d\n", desired.ExternalPort, desired.InternalPort, desired.TargetIP, desired.InternalPort)
+			}
+			if err := s.addPortMapping(desired.ExternalPort, desired.InternalPort, desired.TargetIP); err != nil {
+				log.Printf("Error adding port mapping %d->%d: %v", desired.ExternalPort, desired.InternalPort, err)
+			} else {
+				fmt.Printf("    ✓ Port %d->%d now forwarded to %s:%d\n", desired.ExternalPort, desired.InternalPort, desired.TargetIP, desired.InternalPort)
 				changesMade = true
 			}
-		} else if current.TargetIP != desired.TargetIP {
+		} else if current.TargetIP != desired.TargetIP || current.InternalPort != desired.InternalPort {
 			// Update existing mapping
-			fmt.Printf("  Updating port %d: %s -> %s\n", port, current.TargetIP, desired.TargetIP)
-			if err := s.updatePortMapping(port, desired.TargetIP); err != nil {
-				log.Printf("Error updating port mapping %d: %v", port, err)
+			if desired.ExternalPort == desired.InternalPort {
+				fmt.Printf("  Updating port %d: %s:%d -> %s:%d\n", desired.ExternalPort, current.TargetIP, current.InternalPort, desired.TargetIP, desired.InternalPort)
 			} else {
-				fmt.Printf("    ✓ Port %d now forwarded to %s\n", port, desired.TargetIP)
+				fmt.Printf("  Updating port %d->%d: %s:%d -> %s:%d\n", desired.ExternalPort, desired.InternalPort, current.TargetIP, current.InternalPort, desired.TargetIP, desired.InternalPort)
+			}
+			if err := s.updatePortMapping(desired.ExternalPort, desired.InternalPort, desired.TargetIP); err != nil {
+				log.Printf("Error updating port mapping %d->%d: %v", desired.ExternalPort, desired.InternalPort, err)
+			} else {
+				fmt.Printf("    ✓ Port %d->%d now forwarded to %s:%d\n", desired.ExternalPort, desired.InternalPort, desired.TargetIP, desired.InternalPort)
 				changesMade = true
 			}
 		}
@@ -425,7 +470,7 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 			belongsToUs := false
 			for _, instance := range s.config.Instances {
 				for _, configPort := range instance.Ports {
-					if configPort.Port == port {
+					if configPort.ExternalPortEffective() == port {
 						belongsToUs = true
 						break
 					}
@@ -452,11 +497,11 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 	}
 }
 
-func (s *ServiceState) addPortMapping(port int, targetIP string) error {
+func (s *ServiceState) addPortMapping(externalPort int, internalPort int, targetIP string) error {
 	cmd := exec.Command("netsh", "interface", "portproxy", "add", "v4tov4",
-		fmt.Sprintf("listenport=%d", port),
+		fmt.Sprintf("listenport=%d", externalPort),
 		"listenaddress=0.0.0.0",
-		fmt.Sprintf("connectport=%d", port),
+		fmt.Sprintf("connectport=%d", internalPort),
 		fmt.Sprintf("connectaddress=%s", targetIP))
 
 	if err := cmd.Run(); err != nil {
@@ -466,14 +511,14 @@ func (s *ServiceState) addPortMapping(port int, targetIP string) error {
 	return nil
 }
 
-func (s *ServiceState) updatePortMapping(port int, targetIP string) error {
+func (s *ServiceState) updatePortMapping(externalPort int, internalPort int, targetIP string) error {
 	// Remove existing mapping first
-	if err := s.removePortMapping(port); err != nil {
+	if err := s.removePortMapping(externalPort); err != nil {
 		return fmt.Errorf("failed to remove existing mapping: %v", err)
 	}
 
 	// Add new mapping
-	return s.addPortMapping(port, targetIP)
+	return s.addPortMapping(externalPort, internalPort, targetIP)
 }
 
 func (s *ServiceState) removePortMapping(port int) error {
