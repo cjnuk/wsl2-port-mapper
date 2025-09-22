@@ -15,6 +15,22 @@ WSL2 instances in NAT mode receive dynamic internal IP addresses (172.x.x.x rang
 - ✅ **Live Configuration**: Reloads config file changes without service restart
 - ✅ **Zero Dependencies**: Single executable with no external requirements
 
+## Security and Privacy (IMPORTANT)
+
+⚠️ **DO NOT commit your personal `wsl2-config.json` file!** It contains your private instance names and port mappings.
+
+### Multiple Security Layers:
+- **`.gitignore`**: Blocks ALL `.json` files except `wsl2-config.example.json`
+- **Git hooks**: Pre-commit hooks prevent accidental JSON commits
+- **Secret scanning**: GitHub Actions run Gitleaks to detect sensitive data
+- **Local protection**: Files stored in `%LOCALAPPDATA%\wsl2-port-mapper\` are safe
+
+### Safe Configuration:
+1. Copy `wsl2-config.example.json` → `wsl2-config.json` (locally)
+2. Edit with your actual WSL2 instance names and ports
+3. The file is automatically ignored by Git
+4. Alternatively, store it outside the repo entirely
+
 ## Quick Start
 
 ### Prerequisites
