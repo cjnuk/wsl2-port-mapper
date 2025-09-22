@@ -20,6 +20,7 @@ import (
 type Port struct {
 	Port         int    `json:"port"`
 	InternalPort int    `json:"internal_port,omitempty"`
+	Firewall     string `json:"firewall,omitempty"` // "local", "full", or empty (warn only)
 	Comment      string `json:"comment,omitempty"`
 }
 
@@ -34,6 +35,16 @@ func (p Port) InternalPortEffective() int {
 		return p.InternalPort
 	}
 	return p.ExternalPortEffective()
+}
+
+// FirewallMode returns the firewall configuration mode
+func (p Port) FirewallMode() string {
+	return p.Firewall
+}
+
+// ShouldManageFirewall returns true if automatic firewall management is requested
+func (p Port) ShouldManageFirewall() bool {
+	return p.Firewall == "local" || p.Firewall == "full"
 }
 
 type Instance struct {
@@ -54,6 +65,7 @@ type PortMapping struct {
 	TargetIP     string
 	Instance     string
 	Comment      string
+	FirewallMode string // "local", "full", or empty
 }
 
 type ServiceState struct {
@@ -153,6 +165,34 @@ func (s *ServiceState) validateSetup() error {
 	}
 
 	return nil
+}
+
+// handleFirewallRule manages firewall rules for a port mapping
+func (s *ServiceState) handleFirewallRule(mapping PortMapping) {
+	if mapping.FirewallMode == "" {
+		// No firewall management requested
+		return
+	}
+
+	if mapping.FirewallMode != "local" && mapping.FirewallMode != "full" {
+		log.Printf("Warning: Invalid firewall mode '%s' for port %d, skipping firewall rule", mapping.FirewallMode, mapping.ExternalPort)
+		return
+	}
+
+	log.Printf("Creating firewall rule for port %d (mode: %s, instance: %s)", mapping.ExternalPort, mapping.FirewallMode, mapping.Instance)
+
+	if err := addFirewallRule(mapping.ExternalPort, mapping.Instance, mapping.FirewallMode); err != nil {
+		log.Printf("Warning: Failed to create firewall rule for port %d: %v", mapping.ExternalPort, err)
+		fmt.Printf("    ⚠️  Firewall rule creation failed: %v\n", err)
+		fmt.Printf("    💡 Manual command: netsh advfirewall firewall add rule name=\"WSL2 Port %d\" dir=in action=allow protocol=TCP localport=%d remoteip=%s\n",
+			mapping.ExternalPort, mapping.ExternalPort,
+			map[string]string{"local": "LocalSubnet", "full": "any"}[mapping.FirewallMode])
+	} else {
+		log.Printf("Successfully created firewall rule for port %d", mapping.ExternalPort)
+		fmt.Printf("    🔥 Firewall rule created: %s access to port %d\n",
+			map[string]string{"local": "local network", "full": "any address"}[mapping.FirewallMode],
+			mapping.ExternalPort)
+	}
 }
 
 func (s *ServiceState) loadConfiguration() error {
@@ -269,11 +309,16 @@ func validateConfiguration(configFile string) int {
 func checkFirewallRules(config *Config) int {
 	exitCode := 0
 
-	// Collect all unique external ports
+	// Collect all unique external ports and their firewall settings
 	ports := make(map[int]bool)
+	firewallRules := make(map[int]string) // port -> firewall mode
 	for _, instance := range config.Instances {
 		for _, port := range instance.Ports {
-			ports[port.ExternalPortEffective()] = true
+			externalPort := port.ExternalPortEffective()
+			ports[externalPort] = true
+			if port.ShouldManageFirewall() {
+				firewallRules[externalPort] = port.FirewallMode()
+			}
 		}
 	}
 
@@ -368,17 +413,132 @@ func checkFirewallRules(config *Config) int {
 	} else {
 		fmt.Printf("⚠️  %d port(s) may be blocked by Windows Firewall:\n", len(blockedPorts))
 		for _, port := range blockedPorts {
-			fmt.Printf("  - Port %d (TCP)\n", port)
+			if mode, hasAuto := firewallRules[port]; hasAuto {
+				fmt.Printf("  - Port %d (TCP) - Will be automatically managed (%s mode)\n", port, mode)
+			} else {
+				fmt.Printf("  - Port %d (TCP) - Manual firewall rule needed\n", port)
+			}
 		}
-		fmt.Println("\nℹ️  Suggested commands to allow these ports:")
+
+		// Show what automatic rules would be created
+		automaticRules := false
 		for _, port := range blockedPorts {
-			fmt.Printf("  netsh advfirewall firewall add rule name=\"WSL2 Port %d\" dir=in action=allow protocol=TCP localport=%d\n", port, port)
+			if mode, hasAuto := firewallRules[port]; hasAuto {
+				if !automaticRules {
+					fmt.Println("\n🎆 Automatic firewall rules that will be created:")
+					automaticRules = true
+				}
+				remoteIP := map[string]string{"local": "LocalSubnet", "full": "any"}[mode]
+				accessType := map[string]string{"local": "local network", "full": "any address"}[mode]
+				fmt.Printf("  Port %d: %s access (%s)\n", port, accessType, remoteIP)
+			}
 		}
-		fmt.Println("\n  Or use Windows Firewall GUI: Control Panel > System and Security > Windows Firewall > Advanced Settings")
+
+		// Show manual commands for ports without automatic management
+		manualPorts := make([]int, 0)
+		for _, port := range blockedPorts {
+			if _, hasAuto := firewallRules[port]; !hasAuto {
+				manualPorts = append(manualPorts, port)
+			}
+		}
+
+		if len(manualPorts) > 0 {
+			fmt.Println("\nℹ️  Manual commands for remaining ports:")
+			for _, port := range manualPorts {
+				fmt.Printf("  netsh advfirewall firewall add rule name=\"WSL2 Port %d\" dir=in action=allow protocol=TCP localport=%d\n", port, port)
+			}
+			fmt.Println("\n  Or use Windows Firewall GUI: Control Panel > System and Security > Windows Firewall > Advanced Settings")
+		}
+
+		if !isRunningAsAdmin() && len(firewallRules) > 0 {
+			fmt.Println("\n⚠️  Note: Admin privileges required for automatic firewall rule creation")
+			fmt.Println("    Run as Administrator for automatic firewall management")
+		}
+
 		exitCode = 2
 	}
 
 	return exitCode
+}
+
+// isRunningAsAdmin checks if the current process has admin privileges
+func isRunningAsAdmin() bool {
+	// Try to create a firewall rule in test mode
+	cmd := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all")
+	err := cmd.Run()
+	return err == nil // If we can run netsh advfirewall commands, we likely have admin rights
+}
+
+// generateFirewallRuleName creates a unique firewall rule name
+func generateFirewallRuleName(port int, instance string) string {
+	// Create a short hash from instance name for uniqueness
+	hash := 0
+	for _, char := range instance {
+		hash = hash*31 + int(char)
+	}
+	if hash < 0 {
+		hash = -hash
+	}
+	return fmt.Sprintf("WSL2-Port-%d-%d", port, hash%10000)
+}
+
+// addFirewallRule creates a Windows Firewall rule for the specified port
+func addFirewallRule(port int, instance string, mode string) error {
+	if !isRunningAsAdmin() {
+		return fmt.Errorf("admin privileges required for firewall rule creation")
+	}
+
+	ruleName := generateFirewallRuleName(port, instance)
+
+	// Check if rule already exists
+	checkCmd := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", fmt.Sprintf("name=%s", ruleName))
+	if checkCmd.Run() == nil {
+		// Rule already exists, no need to create
+		return nil
+	}
+
+	// Determine remote IP setting based on mode
+	var remoteIP string
+	switch mode {
+	case "local":
+		remoteIP = "LocalSubnet"
+	case "full":
+		remoteIP = "any"
+	default:
+		return fmt.Errorf("invalid firewall mode: %s", mode)
+	}
+
+	// Create the firewall rule
+	cmd := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+		fmt.Sprintf("name=%s", ruleName),
+		"dir=in",
+		"action=allow",
+		"protocol=TCP",
+		fmt.Sprintf("localport=%d", port),
+		fmt.Sprintf("remoteip=%s", remoteIP),
+		fmt.Sprintf("description=WSL2 port forwarding for %s", instance))
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create firewall rule: %v", err)
+	}
+
+	return nil
+}
+
+// removeFirewallRule removes a Windows Firewall rule
+func removeFirewallRule(port int, instance string) error {
+	if !isRunningAsAdmin() {
+		return fmt.Errorf("admin privileges required for firewall rule removal")
+	}
+
+	ruleName := generateFirewallRuleName(port, instance)
+
+	cmd := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", fmt.Sprintf("name=%s", ruleName))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to remove firewall rule: %v", err)
+	}
+
+	return nil
 }
 
 func (s *ServiceState) validateConfiguration(config *Config) error {
@@ -402,6 +562,11 @@ func (s *ServiceState) validateConfiguration(config *Config) error {
 			// Validate internal port (optional, defaults to external port)
 			if port.InternalPort != 0 && (port.InternalPort < 1 || port.InternalPort > 65535) {
 				return fmt.Errorf("invalid internal port number %d in instance %s", port.InternalPort, instance.Name)
+			}
+
+			// Validate firewall field (optional)
+			if port.Firewall != "" && port.Firewall != "local" && port.Firewall != "full" {
+				return fmt.Errorf("invalid firewall setting '%s' for port %d in instance %s (must be 'local', 'full', or omitted)", port.Firewall, port.Port, instance.Name)
 			}
 
 			// Note: Duplicate external ports are allowed - instances may not run simultaneously
@@ -667,6 +832,7 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 				TargetIP:     ip,
 				Instance:     instance.Name,
 				Comment:      port.Comment,
+				FirewallMode: port.FirewallMode(),
 			}
 		}
 	}
@@ -698,6 +864,9 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 			} else {
 				fmt.Printf("    ✓ Port %d->%d now forwarded to %s:%d\n", desired.ExternalPort, desired.InternalPort, desired.TargetIP, desired.InternalPort)
 				changesMade = true
+
+				// Handle firewall rule if requested
+				s.handleFirewallRule(desired)
 			}
 		} else if current.TargetIP != desired.TargetIP || current.InternalPort != desired.InternalPort {
 			// Update existing mapping
@@ -711,6 +880,9 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 			} else {
 				fmt.Printf("    ✓ Port %d->%d now forwarded to %s:%d\n", desired.ExternalPort, desired.InternalPort, desired.TargetIP, desired.InternalPort)
 				changesMade = true
+
+				// Handle firewall rule if requested
+				s.handleFirewallRule(desired)
 			}
 		}
 	}

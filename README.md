@@ -74,8 +74,10 @@ wsl2-port-forwarder.exe --validate wsl2-config.json
 - ✅ **JSON syntax and structure** 
 - ✅ **Port ranges** (1-65535)
 - ✅ **Instance name validity**
+- ✅ **Firewall configuration validity** ("local", "full", or omitted)
 - ⚠️ **External port conflicts** (warnings, not errors)
 - ⚠️ **Windows Firewall rules** for configured ports
+- 🎆 **Firewall rule preview** (shows what automatic rules will be created)
 
 **Exit codes:**
 - `0` = Configuration valid, no warnings
@@ -96,7 +98,16 @@ Config file: wsl2-config.json
   Port 8080: Ubuntu-Dev, Ubuntu-Staging
     → First instance (Ubuntu-Dev) will win
 
-✅ All configured ports allowed by Windows Firewall
+⚠️  2 port(s) may be blocked by Windows Firewall:
+  - Port 2201 (TCP) - Will be automatically managed (local mode)
+  - Port 8080 (TCP) - Will be automatically managed (full mode)
+
+🎆 Automatic firewall rules that will be created:
+  Port 2201: local network access (LocalSubnet)
+  Port 8080: any address access (any)
+
+⚠️  Note: Admin privileges required for automatic firewall rule creation
+    Run as Administrator for automatic firewall management
 
 ⚠️  Configuration is valid but has warnings
 ```
@@ -175,6 +186,7 @@ wsl --shutdown
 - ✅ **instance names**: Must match exact WSL2 distribution names (`wsl -l`)
 - ✅ **port numbers**: 1-65535, duplicate **external** ports allowed (see Conflict Resolution)
 - ✅ **internal_port** (optional): Target port inside WSL instance; defaults to same as `port`
+- ✅ **firewall** (optional): Automatic Windows Firewall management - "local" or "full"
 - ✅ **comments**: Optional for both instances and ports
 - ✅ **live reload**: Changes take effect on next check cycle (no restart needed)
 
@@ -232,6 +244,38 @@ wsl --shutdown
 Instance 'Ubuntu-Dev' port 8080 -> 172.18.144.5:80     ✅ Active
 Instance 'Ubuntu-Staging' port 8080 -> ignored         ⚠️ Ignored (logged)
 ```
+
+### Automatic Firewall Management
+
+**NEW**: Automatic Windows Firewall rule creation for your ports!
+
+**Configuration Options:**
+- **Omitted/Empty**: Warn if port blocked (current behavior)
+- **"local"**: Create firewall rule allowing **local network** traffic only
+- **"full"**: Create firewall rule allowing traffic from **any address**
+
+**Security Levels:**
+```json
+// No automatic firewall management (default)
+{ "port": 8080, "comment": "Manual firewall setup required" }
+
+// Local network only (recommended for SSH, databases)
+{ "port": 2201, "internal_port": 22, "firewall": "local", "comment": "SSH - local network only" }
+
+// Internet accessible (for web services)
+{ "port": 8080, "internal_port": 80, "firewall": "full", "comment": "HTTP - internet accessible" }
+```
+
+**Security Implications:**
+- 🔒 **"local"**: Safe for internal services (SSH, databases, development servers)
+- 🌐 **"full"**: Exposes service to internet - use carefully!
+- ⚠️ **Admin required**: Firewall rule creation needs Administrator privileges
+
+**What happens:**
+1. ✅ Port forwarding created successfully 
+2. 🔥 Firewall rule created automatically
+3. ℹ️ Detailed logging of firewall operations
+4. 💡 Manual command provided if automatic creation fails
 
 ## Service Management
 
