@@ -13,6 +13,7 @@ out/
 coverage/
 *.test
 *.coverprofile
+*.exe
 
 # Dist: ignore everything except the published executable
 dist/*
