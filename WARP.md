@@ -218,8 +218,14 @@ ssh psdt05 "wsl --list --running"  # Good
 
 **WSL2 networking issues:**
 - Confirm WSL2 uses NAT mode in `~/.wslconfig`: `networkingMode=nat`
+- **Hyper-V firewall conflict**: If you see "Hyper-V firewall is not supported" and fallback to VirtioProxy:
+  - **VirtioProxy mode works perfectly** with WSL2 Port Mapper (uses 10.x.x.x IP range)
+  - Either enable Hyper-V: `Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All` (requires reboot)
+  - Or disable WSL firewall in `.wslconfig`: remove or comment `firewall=true` from `[experimental]`
+  - Or remove `networkingMode=nat` to let WSL2 choose the best mode for your system
 - Restart WSL2 after config changes: `wsl --shutdown`
 - Verify instance IP with: `wsl -d <name> -- hostname -I`
+- Check current networking mode: `wsl --status` or observe startup messages
 
 ## Development Workflows
 
@@ -248,6 +254,33 @@ go test -v ./...
 .\uninstall-service.bat
 go build -o wsl2-port-forwarder.exe main.go  
 .\install-service.bat
+```
+
+### Testing with VirtioProxy Networking Mode
+
+If your WSL2 falls back to VirtioProxy mode instead of NAT:
+
+**VirtioProxy Advantages:**
+- Uses your physical network's IP range (e.g., 10.x.x.x instead of 172.x.x.x)
+- WSL2 instances may share the same IP as Windows host (direct network integration)
+- Potentially better performance (no NAT translation overhead)
+- Simpler firewall management (same IP space as host)
+
+```bash
+# Test if port mapping still works
+.\wsl2-port-forwarder.exe wsl2-config.json
+# Check for IP detection issues or mapping failures
+
+# Verify WSL instance IP manually (may match Windows host IP)
+wsl -d <instance-name> -- hostname -I
+ipconfig | findstr "IPv4 Address"
+
+# Test port proxy creation manually
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8080 connectaddress=<wsl-ip> connectport=8080
+netsh interface portproxy show v4tov4
+
+# Remove test mapping
+netsh interface portproxy delete v4tov4 listenport=8080
 ```
 
 ### Python Automation Scripts
