@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -78,7 +79,7 @@ func TestPortInternalPortEffective(t *testing.T) {
 	}
 }
 
-func TestValidationDuplicateExternalPorts(t *testing.T) {
+func TestValidationAllowDuplicateExternalPorts(t *testing.T) {
 	service := &ServiceState{}
 
 	config := &Config{
@@ -93,18 +94,15 @@ func TestValidationDuplicateExternalPorts(t *testing.T) {
 			{
 				Name: "Ubuntu-2",
 				Ports: []Port{
-					{Port: 8080, InternalPort: 8080}, // Duplicate external port should fail
+					{Port: 8080, InternalPort: 8080}, // Duplicate external port should be allowed
 				},
 			},
 		},
 	}
 
 	err := service.validateConfiguration(config)
-	if err == nil {
-		t.Error("Expected validation error for duplicate external ports, got nil")
-	}
-	if err != nil && !contains(err.Error(), "duplicate external port") {
-		t.Errorf("Expected error about duplicate external port, got: %v", err)
+	if err != nil {
+		t.Errorf("Expected no validation error for duplicate external ports, got: %v", err)
 	}
 }
 
@@ -177,6 +175,106 @@ func TestValidationValidInternalPortZero(t *testing.T) {
 	err := service.validateConfiguration(config)
 	if err != nil {
 		t.Errorf("Expected no validation error for zero internal port, got: %v", err)
+	}
+}
+
+func TestRuntimeConflictResolution(t *testing.T) {
+	// This test would require mocking the running instances
+	// For now, we test that the validation allows duplicates
+	service := &ServiceState{}
+
+	config := &Config{
+		CheckIntervalSeconds: 5,
+		Instances: []Instance{
+			{
+				Name: "Ubuntu-Dev",
+				Ports: []Port{
+					{Port: 2222, InternalPort: 22},
+				},
+			},
+			{
+				Name: "Ubuntu-Prod",
+				Ports: []Port{
+					{Port: 2222, InternalPort: 22}, // Same external port, different instance
+				},
+			},
+		},
+	}
+
+	// Should validate successfully
+	err := service.validateConfiguration(config)
+	if err != nil {
+		t.Errorf("Expected no validation error for duplicate external ports in different instances, got: %v", err)
+	}
+}
+
+func TestValidateOnlyMode(t *testing.T) {
+	// Create a temporary config file
+	tempConfig := `{
+		"check_interval_seconds": 5,
+		"instances": [
+			{
+				"name": "Test-Instance",
+				"ports": [
+					{"port": 8080, "internal_port": 80}
+				]
+			}
+		]
+	}`
+
+	// Note: This test would need file system mocking to be fully testable
+	// For now, we just test the config validation logic
+	service := &ServiceState{}
+	var config Config
+	err := json.Unmarshal([]byte(tempConfig), &config)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal test config: %v", err)
+	}
+
+	err = service.validateConfiguration(&config)
+	if err != nil {
+		t.Errorf("Expected valid config, got error: %v", err)
+	}
+}
+
+func TestValidationPortConflictWarning(t *testing.T) {
+	// Test that we can detect potential port conflicts during validation
+	config := &Config{
+		CheckIntervalSeconds: 5,
+		Instances: []Instance{
+			{
+				Name: "Instance-A",
+				Ports: []Port{
+					{Port: 3000, InternalPort: 3000},
+				},
+			},
+			{
+				Name: "Instance-B",
+				Ports: []Port{
+					{Port: 3000, InternalPort: 3001}, // Same external port
+				},
+			},
+		},
+	}
+
+	// Count potential conflicts
+	portToInstances := make(map[int][]string)
+	for _, instance := range config.Instances {
+		for _, port := range instance.Ports {
+			externalPort := port.ExternalPortEffective()
+			portToInstances[externalPort] = append(portToInstances[externalPort], instance.Name)
+		}
+	}
+
+	conflicts := 0
+	for _, instances := range portToInstances {
+		if len(instances) > 1 {
+			conflicts++
+		}
+	}
+
+	if conflicts != 1 {
+		t.Errorf("Expected 1 port conflict, found %d", conflicts)
 	}
 }
 

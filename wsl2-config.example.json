@@ -22,6 +22,22 @@
       ]
     },
     {
+      "name": "Ubuntu-Staging",
+      "comment": "Staging environment (may conflict with dev)",
+      "ports": [
+        {
+          "port": 2201,
+          "internal_port": 22,
+          "comment": "SSH (shares external port with dev - conflict OK if not simultaneous)"
+        },
+        {
+          "port": 8080,
+          "internal_port": 80,
+          "comment": "HTTP server (shares external port with dev - conflict OK)"
+        }
+      ]
+    },
+    {
       "name": "Ubuntu-ML",
       "comment": "Machine Learning workspace",
       "ports": [

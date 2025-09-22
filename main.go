@@ -65,12 +65,35 @@ type ServiceState struct {
 
 func main() {
 	// Check command line arguments
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: wsl2-port-forwarder.exe <config-file.json>")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		fmt.Println("Usage: wsl2-port-forwarder.exe [--validate] <config-file.json>")
+		fmt.Println("")
+		fmt.Println("Options:")
+		fmt.Println("  --validate    Validate configuration and firewall rules, then exit")
+		fmt.Println("")
+		fmt.Println("Examples:")
+		fmt.Println("  wsl2-port-forwarder.exe wsl2-config.json")
+		fmt.Println("  wsl2-port-forwarder.exe --validate wsl2-config.json")
 		os.Exit(1)
 	}
 
-	configFile := os.Args[1]
+	var validateOnly bool
+	var configFile string
+
+	if len(os.Args) == 3 {
+		if os.Args[1] != "--validate" {
+			fmt.Printf("Unknown option: %s\n", os.Args[1])
+			os.Exit(1)
+		}
+		validateOnly = true
+		configFile = os.Args[2]
+	} else {
+		configFile = os.Args[1]
+	}
+
+	if validateOnly {
+		os.Exit(validateConfiguration(configFile))
+	}
 
 	// Initialize service state
 	service := &ServiceState{
@@ -154,14 +177,215 @@ func (s *ServiceState) loadConfiguration() error {
 	return nil
 }
 
+// validateConfiguration validates config file and optionally checks firewall rules
+func validateConfiguration(configFile string) int {
+	fmt.Println("WSL2 Port Forwarder - Configuration Validation")
+	fmt.Println("=============================================")
+	fmt.Printf("Config file: %s\n\n", configFile)
+
+	exitCode := 0 // 0=success, 1=error, 2=warnings
+
+	// Check if configuration file exists
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Printf("❌ Configuration file does not exist: %s\n", configFile)
+		return 1
+	}
+
+	// Load and parse configuration
+	data, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		fmt.Printf("❌ Failed to read config file: %v\n", err)
+		return 1
+	}
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		fmt.Printf("❌ Failed to parse JSON config: %v\n", err)
+		return 1
+	}
+
+	// Validate configuration structure
+	service := &ServiceState{}
+	if err := service.validateConfiguration(&config); err != nil {
+		fmt.Printf("❌ Configuration validation failed: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("✅ Configuration syntax and structure: Valid\n")
+	fmt.Printf("✅ Check interval: %d seconds\n", config.CheckIntervalSeconds)
+	fmt.Printf("✅ Configured instances: %d\n\n", len(config.Instances))
+
+	// Check for potential external port conflicts
+	portToInstances := make(map[int][]string)
+	for _, instance := range config.Instances {
+		for _, port := range instance.Ports {
+			externalPort := port.ExternalPortEffective()
+			portToInstances[externalPort] = append(portToInstances[externalPort], instance.Name)
+		}
+	}
+
+	conflictsFound := false
+	for port, instances := range portToInstances {
+		if len(instances) > 1 {
+			if !conflictsFound {
+				fmt.Println("⚠️  Potential external port conflicts (if instances run simultaneously):")
+				conflictsFound = true
+				exitCode = 2 // warnings
+			}
+			fmt.Printf("  Port %d: %s\n", port, strings.Join(instances, ", "))
+			fmt.Printf("    → First instance (%s) will win, others ignored at runtime\n", instances[0])
+		}
+	}
+
+	if conflictsFound {
+		fmt.Println("\nℹ️  Note: Port conflicts are allowed if instances don't run simultaneously.")
+		fmt.Println("    Examples: dev/staging/prod environments, or seasonal services.")
+	} else {
+		fmt.Println("✅ No external port conflicts detected")
+	}
+
+	// Validate Windows Firewall rules
+	fmt.Println("\nℹ️  Checking Windows Firewall rules...")
+	firewallExitCode := checkFirewallRules(&config)
+	if firewallExitCode > exitCode {
+		exitCode = firewallExitCode
+	}
+
+	// Summary
+	fmt.Println("\n" + strings.Repeat("=", 50))
+	switch exitCode {
+	case 0:
+		fmt.Println("✅ Configuration is valid and ready for use")
+	case 1:
+		fmt.Println("❌ Configuration has errors that must be fixed")
+	case 2:
+		fmt.Println("⚠️  Configuration is valid but has warnings")
+	}
+
+	return exitCode
+}
+
+// checkFirewallRules validates that Windows Firewall allows the configured ports
+func checkFirewallRules(config *Config) int {
+	exitCode := 0
+
+	// Collect all unique external ports
+	ports := make(map[int]bool)
+	for _, instance := range config.Instances {
+		for _, port := range instance.Ports {
+			ports[port.ExternalPortEffective()] = true
+		}
+	}
+
+	if len(ports) == 0 {
+		fmt.Println("✅ No ports to check")
+		return 0
+	}
+
+	// Check Windows Firewall rules using netsh
+	cmd := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in", "protocol=tcp")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("⚠️  Unable to check firewall rules: %v\n", err)
+		fmt.Println("    Please verify firewall rules manually")
+		return 2
+	}
+
+	// Parse firewall rules to find which TCP ports are allowed
+	allowedPorts := make(map[int]bool)
+	lines := strings.Split(string(output), "\n")
+	var currentRule string
+	var isEnabled bool
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for rule name
+		if strings.HasPrefix(line, "Rule Name:") {
+			currentRule = strings.TrimPrefix(line, "Rule Name:")
+			currentRule = strings.TrimSpace(currentRule)
+			isEnabled = false
+		}
+
+		// Check if rule is enabled
+		if strings.HasPrefix(line, "Enabled:") && strings.Contains(line, "Yes") {
+			isEnabled = true
+		}
+
+		// Look for local ports
+		if strings.HasPrefix(line, "LocalPort:") && isEnabled {
+			portStr := strings.TrimPrefix(line, "LocalPort:")
+			portStr = strings.TrimSpace(portStr)
+
+			// Handle "Any" or specific ports
+			if portStr == "Any" {
+				// All ports are allowed by this rule
+				for port := range ports {
+					allowedPorts[port] = true
+				}
+			} else {
+				// Parse specific ports (could be ranges or single ports)
+				portParts := strings.Split(portStr, ",")
+				for _, part := range portParts {
+					part = strings.TrimSpace(part)
+					if strings.Contains(part, "-") {
+						// Port range
+						rangeParts := strings.Split(part, "-")
+						if len(rangeParts) == 2 {
+							start, err1 := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+							end, err2 := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+							if err1 == nil && err2 == nil {
+								for p := start; p <= end; p++ {
+									if ports[p] {
+										allowedPorts[p] = true
+									}
+								}
+							}
+						}
+					} else {
+						// Single port
+						if port, err := strconv.Atoi(part); err == nil {
+							if ports[port] {
+								allowedPorts[port] = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check which ports need firewall rules
+	blockedPorts := make([]int, 0)
+	for port := range ports {
+		if !allowedPorts[port] {
+			blockedPorts = append(blockedPorts, port)
+		}
+	}
+
+	if len(blockedPorts) == 0 {
+		fmt.Println("✅ All configured ports are allowed by Windows Firewall")
+	} else {
+		fmt.Printf("⚠️  %d port(s) may be blocked by Windows Firewall:\n", len(blockedPorts))
+		for _, port := range blockedPorts {
+			fmt.Printf("  - Port %d (TCP)\n", port)
+		}
+		fmt.Println("\nℹ️  Suggested commands to allow these ports:")
+		for _, port := range blockedPorts {
+			fmt.Printf("  netsh advfirewall firewall add rule name=\"WSL2 Port %d\" dir=in action=allow protocol=TCP localport=%d\n", port, port)
+		}
+		fmt.Println("\n  Or use Windows Firewall GUI: Control Panel > System and Security > Windows Firewall > Advanced Settings")
+		exitCode = 2
+	}
+
+	return exitCode
+}
+
 func (s *ServiceState) validateConfiguration(config *Config) error {
 	// Validate check interval
 	if config.CheckIntervalSeconds < 1 || config.CheckIntervalSeconds > 3600 {
 		return fmt.Errorf("check_interval_seconds must be between 1 and 3600")
 	}
-
-	// Track used external ports to detect duplicates
-	usedExternalPorts := make(map[int]string)
 
 	// Validate instances and ports
 	for _, instance := range config.Instances {
@@ -180,13 +404,9 @@ func (s *ServiceState) validateConfiguration(config *Config) error {
 				return fmt.Errorf("invalid internal port number %d in instance %s", port.InternalPort, instance.Name)
 			}
 
-			// Check for duplicate external ports (this is not allowed)
-			externalPort := port.ExternalPortEffective()
-			if existingInstance, exists := usedExternalPorts[externalPort]; exists {
-				return fmt.Errorf("duplicate external port %d found in instances %s and %s", externalPort, existingInstance, instance.Name)
-			}
-
-			usedExternalPorts[externalPort] = instance.Name
+			// Note: Duplicate external ports are allowed - instances may not run simultaneously
+			// Runtime conflict resolution will handle cases where multiple instances with
+			// the same external port are running at the same time
 		}
 	}
 
@@ -409,8 +629,11 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 
 	changesMade := false
 
-	// Build desired state
+	// Build desired state with conflict resolution
 	desiredMappings := make(map[int]PortMapping)
+	conflictedPorts := make(map[int][]string) // track conflicts for logging
+
+	// Process instances in config file order (deterministic)
 	for _, instance := range s.config.Instances {
 		ip, isRunning := s.runningInstances[instance.Name]
 		if !isRunning {
@@ -420,6 +643,24 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 		for _, port := range instance.Ports {
 			externalPort := port.ExternalPortEffective()
 			internalPort := port.InternalPortEffective()
+
+			// Check if this external port is already claimed
+			if existing, exists := desiredMappings[externalPort]; exists {
+				// Port conflict! Log warning and ignore this instance's port
+				log.Printf("WARNING: Instance '%s' port %d conflicts with '%s', ignoring",
+					instance.Name, externalPort, existing.Instance)
+				fmt.Printf("  ⚠️  Port conflict: Instance '%s' port %d ignored (conflicts with '%s')\n",
+					instance.Name, externalPort, existing.Instance)
+
+				// Track conflict for summary
+				if conflictedPorts[externalPort] == nil {
+					conflictedPorts[externalPort] = []string{existing.Instance}
+				}
+				conflictedPorts[externalPort] = append(conflictedPorts[externalPort], instance.Name)
+				continue
+			}
+
+			// No conflict, add mapping
 			desiredMappings[externalPort] = PortMapping{
 				ExternalPort: externalPort,
 				InternalPort: internalPort,
@@ -428,6 +669,17 @@ func (s *ServiceState) reconcilePortForwarding(currentMappings map[int]PortMappi
 				Comment:      port.Comment,
 			}
 		}
+	}
+
+	// Display conflict summary if any conflicts occurred
+	if len(conflictedPorts) > 0 {
+		fmt.Println("\n⚠️  External port conflicts detected:")
+		for externalPort, instances := range conflictedPorts {
+			fmt.Printf("  Port %d: %s (winner) vs %s (ignored)\n",
+				externalPort, instances[0], strings.Join(instances[1:], ", "))
+		}
+		fmt.Println("  First instance in config file wins, others ignored at runtime.")
+		fmt.Println()
 	}
 
 	// Check for updates needed

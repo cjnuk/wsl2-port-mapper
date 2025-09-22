@@ -49,6 +49,9 @@ WSL2 instances in NAT mode receive dynamic internal IP addresses (172.x.x.x rang
 ### Basic Usage
 
 ```bash
+# Validate configuration before using
+wsl2-port-forwarder.exe --validate wsl2-config.json
+
 # Check service status
 check-service.bat
 
@@ -57,6 +60,45 @@ netsh interface portproxy show v4tov4
 
 # Restart service if needed
 nssm restart WSL2PortForwarder
+```
+
+### Configuration Validation
+
+**NEW**: Use `--validate` to check your configuration before deployment:
+
+```bash
+wsl2-port-forwarder.exe --validate wsl2-config.json
+```
+
+**What it checks:**
+- ✅ **JSON syntax and structure** 
+- ✅ **Port ranges** (1-65535)
+- ✅ **Instance name validity**
+- ⚠️ **External port conflicts** (warnings, not errors)
+- ⚠️ **Windows Firewall rules** for configured ports
+
+**Exit codes:**
+- `0` = Configuration valid, no warnings
+- `1` = Configuration has errors (must fix)
+- `2` = Configuration valid but has warnings
+
+**Example output:**
+```
+WSL2 Port Forwarder - Configuration Validation
+==============================================
+Config file: wsl2-config.json
+
+✅ Configuration syntax and structure: Valid
+✅ Check interval: 5 seconds
+✅ Configured instances: 3
+
+⚠️  Potential external port conflicts:
+  Port 8080: Ubuntu-Dev, Ubuntu-Staging
+    → First instance (Ubuntu-Dev) will win
+
+✅ All configured ports allowed by Windows Firewall
+
+⚠️  Configuration is valid but has warnings
 ```
 
 ## WSL Configuration
@@ -131,7 +173,7 @@ wsl --shutdown
 
 - ✅ **check_interval_seconds**: 1-3600 seconds (how often to check for changes)
 - ✅ **instance names**: Must match exact WSL2 distribution names (`wsl -l`)
-- ✅ **port numbers**: 1-65535, no duplicate **external** ports across all instances
+- ✅ **port numbers**: 1-65535, duplicate **external** ports allowed (see Conflict Resolution)
 - ✅ **internal_port** (optional): Target port inside WSL instance; defaults to same as `port`
 - ✅ **comments**: Optional for both instances and ports
 - ✅ **live reload**: Changes take effect on next check cycle (no restart needed)
@@ -161,6 +203,34 @@ wsl --shutdown
 
 // Same external and internal port (legacy behavior)
 { "port": 3000, "comment": "Node.js dev server" }
+
+// Allowed: Same external port for different instances (runtime conflict resolution)
+{ "port": 2201, "internal_port": 22, "comment": "Dev SSH" },    // Ubuntu-Dev
+{ "port": 2201, "internal_port": 22, "comment": "Staging SSH" } // Ubuntu-Staging
+```
+
+### Runtime Conflict Resolution
+
+**NEW**: Duplicate external ports are now allowed! This enables flexible scenarios:
+
+**Common Use Cases:**
+- **Dev/Staging/Prod environments** that don't run simultaneously
+- **Seasonal services** (e.g., tax software active only during tax season)
+- **Testing configurations** where you switch between different setups
+
+**How it works:**
+- Multiple instances can specify the same external port
+- If multiple instances with the same external port run simultaneously:
+  - ✅ **First instance in config file wins** (gets the port)
+  - ⚠️ **Later instances are ignored** (with warning logs)
+  - 📢 **Conflict summary displayed** during operation
+
+**Example Scenario:**
+```bash
+# Both instances configured for external port 8080
+# If both are running simultaneously:
+Instance 'Ubuntu-Dev' port 8080 -> 172.18.144.5:80     ✅ Active
+Instance 'Ubuntu-Staging' port 8080 -> ignored         ⚠️ Ignored (logged)
 ```
 
 ## Service Management
