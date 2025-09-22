@@ -169,6 +169,29 @@ netsh interface portproxy delete v4tov4 listenport=8080
 netsh interface portproxy reset
 ```
 
+### Firewall Rule Audit Commands
+
+```powershell
+# Show all WSL2 Port Mapper firewall rules
+Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*" | Select-Object DisplayName, Enabled, Direction
+
+# Show detailed firewall rule information
+Get-NetFirewallRule -DisplayName "WSL2-Port-8080-*" | Get-NetFirewallAddressFilter
+
+# Find orphaned firewall rules (rules without corresponding port proxies)
+$portRules = Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*"
+$activeProxies = (netsh interface portproxy show v4tov4 | Select-String "\d+").Matches.Value
+foreach ($rule in $portRules) {
+    $port = ($rule.DisplayName -split '-')[2]
+    if ($port -notin $activeProxies) {
+        Write-Host "Orphaned rule: $($rule.DisplayName)" -ForegroundColor Yellow
+    }
+}
+
+# Clean up all WSL2 firewall rules (emergency cleanup)
+# Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*" | Remove-NetFirewallRule
+```
+
 ### Firewall Management
 
 ```bash
@@ -297,7 +320,14 @@ netsh interface portproxy delete v4tov4 listenport=8080
 echo '{"check_interval_seconds": 5, "instances": [{"name": "<instance>", "ports": [{"port": 8080, "firewall": "local"}]}]}' > test-config.json
 .\wsl2-port-forwarder.exe test-config.json
 # Watch for firewall rule creation messages
-# Clean up: Remove-NetFirewallRule -DisplayName "WSL2-Port-8080-*"
+
+# Test firewall cleanup (current security gap)
+wsl --terminate <instance>  # Stop the WSL2 instance
+# Port proxy should be removed, but firewall rule may remain
+Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port-8080*"  # Should be empty after fix
+
+# Manual cleanup until fix is implemented:
+Remove-NetFirewallRule -DisplayName "WSL2-Port-8080-*"
 ```
 
 ### Optimal .wslconfig for VirtioProxy Mode
@@ -386,3 +416,39 @@ wsl --list --running --quiet
 - Service can be deployed to multiple Windows hosts via directory copy
 - Configuration files are environment-specific (never commit personal configs)
 - Use `--validate` flag in CI pipelines to catch configuration errors early
+
+## Security Improvement Opportunity
+
+**Current Gap**: The service has `removeFirewallRule()` function but doesn't call it during reconciliation.
+
+**Issue**: When WSL2 instances stop or are removed from configuration:
+- ✅ Port proxy mappings are removed (good security)
+- ❌ Firewall rules remain active (security exposure)
+
+**Impact**: Unnecessary firewall holes remain open after services shut down.
+
+**Proposed Fix**: Modify `reconcilePortForwarding()` in `main.go` line ~944-952:
+```go
+// Current code only removes port mapping:
+if err := s.removePortMapping(port); err != nil {
+    log.Printf("Error removing port mapping %d: %v", port, err)
+} else {
+    fmt.Printf("    ✓ Port %d mapping removed\n", port)
+    changesMade = true
+    
+    // ADD THIS: Remove corresponding firewall rule
+    for _, instance := range s.config.Instances {
+        for _, configPort := range instance.Ports {
+            if configPort.ExternalPortEffective() == port && configPort.ShouldManageFirewall() {
+                if err := removeFirewallRule(port, instance.Name); err != nil {
+                    log.Printf("Warning: Failed to remove firewall rule for port %d: %v", port, err)
+                } else {
+                    fmt.Printf("    🔥 Firewall rule removed for port %d\n", port)
+                }
+            }
+        }
+    }
+}
+```
+
+**Testing**: Use `Get-NetFirewallRule | Where-Object DisplayName -like "*WSL2-Port*"` to verify cleanup.

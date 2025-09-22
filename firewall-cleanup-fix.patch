@@ -1,0 +1,28 @@
+--- main.go.original	2025-09-22 12:53:00.000000000 +0000
++++ main.go.fixed		2025-09-22 12:54:00.000000000 +0000
+@@ -944,10 +944,24 @@
+ 		if belongsToUs {
+ 			fmt.Printf("  Removing port %d (instance no longer running)\n", port)
+ 			if err := s.removePortMapping(port); err != nil {
+ 				log.Printf("Error removing port mapping %d: %v", port, err)
+ 			} else {
+ 				fmt.Printf("    ✓ Port %d mapping removed\n", port)
+ 				changesMade = true
++				
++				// SECURITY FIX: Remove corresponding firewall rule
++				for _, instance := range s.config.Instances {
++					for _, configPort := range instance.Ports {
++						if configPort.ExternalPortEffective() == port && configPort.ShouldManageFirewall() {
++							if err := removeFirewallRule(port, instance.Name); err != nil {
++								log.Printf("Warning: Failed to remove firewall rule for port %d: %v", port, err)
++								fmt.Printf("    ⚠️  Manual cleanup needed: Remove-NetFirewallRule -DisplayName \"WSL2-Port-%d-*\"\n", port)
++							} else {
++								fmt.Printf("    🔥 Firewall rule removed for port %d\n", port)
++							}
++							break // Only need to remove once per port
++						}
++					}
++				}
+ 			}
+ 		}
+ 	}
