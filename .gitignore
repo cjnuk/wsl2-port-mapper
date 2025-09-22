@@ -46,16 +46,51 @@ $RECYCLE.BIN/
 
 # System/environment specific
 .env
+.env.*
 .env.local
 .env.production
+.env.development
+.env.staging
 *.pem
 *.key
 *.crt
+*.cert
+*.cer
 *.p12
 *.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.ppk
 
 # Backup files
 *.bak
 *.backup
 *.orig
 *~
+
+# Security sensitive patterns
+*secret*
+*password*
+*passwd*
+*token*
+*apikey*
+*api-key*
+*credentials*
+auth.json
+secrets.json
+*.secrets
+*_secret
+*_password
+*_token
+*_key
+
+# Database dumps and sensitive data
+*.sql
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+*.mdb
