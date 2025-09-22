@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-blocked=$(git diff --cached --name-only | grep -E '(^|/|\\)wsl2-config\.json$' || true)
+blocked=$(git diff --cached --name-only | grep -E '\.json$' | grep -v -E '(wsl2-config\.example\.json|package\.json|tsconfig\.json|\.vscode/.*\.json)$' || true)
 if [ -n "$blocked" ]; then
-  echo "ERROR: Attempting to commit sensitive file: wsl2-config.json"
-  echo "This file is intentionally ignored. Use wsl2-config.example.json instead."
+  echo "ERROR: Attempting to commit JSON files (potentially sensitive):"
+  echo "$blocked"
+  echo "Only wsl2-config.example.json is allowed. All other JSON files are blocked for security."
   exit 1
 fi

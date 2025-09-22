@@ -1,5 +1,6 @@
-# Sensitive user configuration (DO NOT COMMIT)
-wsl2-config.json
+# JSON files (ignore all except example)
+*.json
+!wsl2-config.example.json
 
 # Logs
 logs/
