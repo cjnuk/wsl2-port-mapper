@@ -141,12 +141,17 @@ ai-runner analyze-pr --cache --agents claude,gemini
 
 ### How Port Mapping Works
 
-WSL2 instances receive dynamic IP addresses in the 172.x.x.x range that change on:
+WSL2 instances receive dynamic IP addresses that change on:
 - Windows reboots
-- WSL2 instance restarts
+- WSL2 instance restarts  
 - WSL2 subsystem shutdown (`wsl --shutdown`)
 
-The service maintains `netsh interface portproxy` rules that forward Windows host ports to current WSL2 instance IPs.
+**Port Proxy vs Port Forwarding:**
+- **Port Proxy** (`netsh portproxy`): Application-layer TCP proxy within Windows host
+- **Port Forwarding**: Network-layer packet forwarding (router/firewall level)
+- WSL2 uses **port proxy** - Windows acts as TCP proxy between host and WSL2 network namespaces
+
+The service maintains `netsh interface portproxy` rules that proxy Windows host ports to current WSL2 instance IPs.
 
 ### Manual Port Mapping Commands
 
@@ -287,6 +292,12 @@ netsh interface portproxy show v4tov4
 
 # Remove test mapping
 netsh interface portproxy delete v4tov4 listenport=8080
+
+# Test automatic firewall rule creation
+echo '{"check_interval_seconds": 5, "instances": [{"name": "<instance>", "ports": [{"port": 8080, "firewall": "local"}]}]}' > test-config.json
+.\wsl2-port-forwarder.exe test-config.json
+# Watch for firewall rule creation messages
+# Clean up: Remove-NetFirewallRule -DisplayName "WSL2-Port-8080-*"
 ```
 
 ### Optimal .wslconfig for VirtioProxy Mode
@@ -363,9 +374,13 @@ wsl --list --running --quiet
 - Direct root access when available: `ssh vllmr` (preferred over indirect access)
 
 **Multi-Instance Management:**
-- Configure multiple WSL instances with unique external ports
+- Configure multiple WSL2 instances with unique external ports
 - Use shared external ports for dev/staging environments that don't run simultaneously
-- Leverage automatic firewall management (`"firewall": "local"` or `"firewall": "full"`)
+- **Leverage automatic firewall management:**
+  - `"firewall": "local"` → `RemoteAddress: LocalSubnet` (secure for internal services)
+  - `"firewall": "full"` → `RemoteAddress: Any` (public internet access)
+  - Creates rules like `WSL2-Port-8080-<hash>` with proper port-specific configuration
+  - Eliminates manual firewall rule creation and management
 
 **CI/CD Integration:**
 - Service can be deployed to multiple Windows hosts via directory copy
